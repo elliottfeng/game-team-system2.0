@@ -323,11 +323,11 @@ def main_page():
     
     # 提交按钮
     if st.button("✅ 确认组队"):
-        if 3 <= len(selected) <= 5:  # 必须选择3到5人
+        if 2 <= len(selected) <= 5:  # 必须选择3到5人
             if create_team([captain] + selected, captain):
                 st.rerun()
         else:
-            st.error("请选择3到5名队员!")
+            st.error("请选择2到5名队员!")
 
 def admin_panel():
     """管理员界面"""
