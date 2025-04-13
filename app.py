@@ -492,7 +492,7 @@ def main():
     if not st.session_state.admin_logged_in:
         with st.sidebar:
             st.title("导航菜单")
-            st.image("https://cdn.biubiu001.com/p/ping/20250410/img/b1b152ffc1697af5cfa95e0d05b3aa26.png?x-oss-process=image/resize,w_400/format,webp/quality,Q_90", width=150, use_column_width='auto')
+            st.image("https://cdn.biubiu001.com/p/ping/20250410/img/b1b152ffc1697af5cfa95e0d05b3aa26.png?x-oss-process=image/resize,w_400/format,webp/quality,Q_90", width=150, use_container_width=True)
             page = st.radio("选择页面", ["组队系统", "查看组队列表"], index=0)
             
         if page == "组队系统":
