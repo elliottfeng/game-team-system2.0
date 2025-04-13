@@ -376,7 +376,6 @@ def main():
     if not st.session_state.admin_logged_in:
         with st.sidebar:
             st.title("导航菜单")
-            st.image("https://via.placeholder.com/150x50?text=游戏组队系统", width=150)
             page = st.radio("选择页面", ["组队系统", "查看组队列表"], index=0)
             
         if page == "组队系统":
