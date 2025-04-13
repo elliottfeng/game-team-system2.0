@@ -26,10 +26,6 @@ GAME_CLASSES = [
     '无尘', '武当', '逍遥', '星宿', '玄机'
 ]
 
-# 组队配置
-MIN_TEAM_MEMBERS = 3  # 最少需要3人组队
-MAX_TEAM_MEMBERS = 6  # 最多6人组队
-
 # ========================
 # Supabase 数据操作模块
 # ========================
@@ -87,8 +83,7 @@ def create_team_in_db(captain: str, members: List[str]) -> bool:
             "id": next_id,
             "captain": captain,
             "members": members,
-            "created_at": datetime.now().isoformat(),
-            "team_size": len(members) + 1  # 队长+队员数
+            "created_at": datetime.now().isoformat()
         }).execute()
         
         if response.data:
@@ -179,13 +174,8 @@ def check_admin_password():
 def create_team(team_members: List[str], captain: str) -> bool:
     """创建队伍"""
     try:
-        team_size = len(team_members) + 1  # 包括队长
-        
-        if team_size < MIN_TEAM_MEMBERS:
-            st.error(f"队伍至少需要{MIN_TEAM_MEMBERS}名成员!")
-            return False
-        if team_size > MAX_TEAM_MEMBERS:
-            st.error(f"队伍最多只能有{MAX_TEAM_MEMBERS}名成员!")
+        if len(team_members) < 3 or len(team_members) > 6:
+            st.error("队伍需要至少3名成员且最多6名成员!")
             return False
         
         # 验证所有成员存在
@@ -206,7 +196,7 @@ def create_team(team_members: List[str], captain: str) -> bool:
             # 更新本地状态
             st.session_state.teams = load_teams()
             st.session_state.players = load_players()
-            st.success(f"组队成功! 队伍人数: {team_size}人")
+            st.success("组队成功!")
             return True
         return False
     except Exception as e:
@@ -225,16 +215,10 @@ def show_team_list():
         return
     
     # 显示队伍统计信息
-    total_teams = len(st.session_state.teams)
-    total_players = sum(len(team['members']) + 1 for team in st.session_state.teams)  # 每个队伍有队长+成员
-    
-    cols = st.columns(3)
-    cols[0].metric("总队伍数", total_teams)
-    cols[1].metric("总参与人数", total_players)
-    cols[2].metric("平均队伍人数", f"{total_players/total_teams:.1f}" if total_teams > 0 else 0)
+    st.subheader(f"当前共有 {len(st.session_state.teams)} 支队伍")
     
     for team in st.session_state.teams:
-        with st.expander(f"队伍 {team['id']} - 队长: {team['captain']} ({len(team['members'])+1}人)", expanded=True):
+        with st.expander(f"队伍 {team['id']} - 队长: {team['captain']}", expanded=True):
             # 获取队伍成员详细信息
             members_info = []
             for member in team['members']:
@@ -251,21 +235,16 @@ def show_team_list():
             with cols[0]:
                 st.metric("队伍ID", team['id'])
                 st.metric("队长", team['captain'])
-                st.metric("队伍人数", len(team['members']) + 1)
                 if 'created_at' in team:
                     created_time = pd.to_datetime(team['created_at']).strftime('%Y-%m-%d %H:%M')
-                    st.caption(f"创建时间: {created_time}")
+                    st.metric("创建时间", created_time)
             
             with cols[1]:
                 # 显示成员表格
                 df = pd.DataFrame({
-                    '角色': ['队长'] + ['队员']*(len(team['members'])),
-                    '游戏ID': [team['captain']] + [m['游戏ID'] for m in members_info],
-                    '游戏职业': [st.session_state.players[
-                        st.session_state.players['game_id'] == team['captain']
-                        ]['class'].values[0] if not st.session_state.players[
-                            st.session_state.players['game_id'] == team['captain']].empty else "未知"
-                    ] + [m['游戏职业'] for m in members_info]
+                    '角色': ['队长'] + ['队员']*(len(team['members'])-1),
+                    '游戏ID': [m['游戏ID'] for m in members_info],
+                    '游戏职业': [m['游戏职业'] for m in members_info]
                 })
                 st.dataframe(df, hide_index=True, use_container_width=True)
 
@@ -293,7 +272,6 @@ def main_page():
     
     # 组队表单
     st.header("🛠️ 创建队伍")
-    st.caption(f"组队要求: 至少{MIN_TEAM_MEMBERS}人，最多{MAX_TEAM_MEMBERS}人 (包括队长)")
     
     # 队长选择
     available_captains = st.session_state.players[~st.session_state.players['is_selected']]['game_id']
@@ -312,19 +290,14 @@ def main_page():
         (~st.session_state.players['is_selected']) & 
         (st.session_state.players['game_id'] != captain)
     ]['game_id']
-    selected = st.multiselect(
-        f"选择队员 (需要至少{MIN_TEAM_MEMBERS-1}人，最多{MAX_TEAM_MEMBERS-1}人):", 
-        options=available, 
-        key='members'
-    )
+    selected = st.multiselect("选择5名队员:", options=available, key='members')
     
     # 显示队伍预览
     if captain and selected:
         st.subheader("队伍预览")
         try:
             team_members = [captain] + selected
-            team_size = len(team_members)
-            roles = ['队长'] + ['队员'] * (team_size - 1)
+            roles = ['队长'] + ['队员'] * len(selected)
             
             # 获取职业信息
             classes = []
@@ -345,22 +318,165 @@ def main_page():
             })
             st.dataframe(team_df, hide_index=True)
             
-            # 显示队伍人数信息
-            st.info(f"当前队伍人数: {team_size}人 (最少需要{MIN_TEAM_MEMBERS}人，最多{MAX_TEAM_MEMBERS}人)")
-            
         except Exception as e:
             st.error(f"创建预览失败: {str(e)}")
     
     # 提交按钮
     if st.button("✅ 确认组队"):
-        team_size = len(selected) + 1  # 包括队长
-        if team_size >= MIN_TEAM_MEMBERS and team_size <= MAX_TEAM_MEMBERS:
-            if create_team(selected, captain):
-                st.rerun()
-        else:
-            st.error(f"队伍人数不符合要求! 需要{MIN_TEAM_MEMBERS}-{MAX_TEAM_MEMBERS}人，当前{team_size}人")
+        if 2 <= len(selected) <= 5:  # 必须选择3到5人
+            if create_team([captain] + selected, captain):
+            st.rerun()
+    else:
+        st.error("请选择3到5名队员!")
 
-# ... [保持admin_panel和其他函数不变] ...
+def admin_panel():
+    """管理员界面"""
+    st.header("📊 管理员后台")
+    
+    tab1, tab2, tab3 = st.tabs(["玩家管理", "队伍管理", "数据维护"])
+    
+    with tab1:
+        st.subheader("玩家名单管理")
+        
+        # 添加新玩家
+        with st.expander("添加玩家", expanded=True):
+            cols = st.columns(2)
+            with cols[0]:
+                new_id = st.text_input("游戏ID", key="new_id")
+            with cols[1]:
+                new_class = st.selectbox("职业", GAME_CLASSES, key="new_class")
+            if st.button("添加"):
+                if new_id:
+                    if add_player(new_id, new_class):
+                        st.session_state.players = load_players()
+                        st.rerun()
+        
+        # 玩家列表编辑
+        st.subheader("当前玩家")
+        edited_df = st.data_editor(
+            st.session_state.players.rename(columns={
+                'display_id': '序号',
+                'game_id': '游戏ID',
+                'class': '游戏职业',
+                'is_selected': '已选择'
+            }),
+            column_order=["序号", "游戏ID", "游戏职业", "已选择"],
+            num_rows="dynamic",
+            column_config={
+                "序号": st.column_config.NumberColumn(width="small", disabled=True),
+                "游戏ID": st.column_config.TextColumn(width="medium"),
+                "游戏职业": st.column_config.SelectboxColumn(options=GAME_CLASSES),
+                "已选择": st.column_config.CheckboxColumn(disabled=True)
+            },
+            hide_index=True
+        )
+        
+        if st.button("保存修改"):
+            # 重命名回原始列名
+            updated_players = edited_df.rename(columns={
+                '序号': 'display_id',
+                '游戏ID': 'game_id',
+                '游戏职业': 'class',
+                '已选择': 'is_selected'
+            })
+            
+            # 更新数据库
+            try:
+                for _, row in updated_players.iterrows():
+                    supabase.table('players').update({
+                        'game_id': row['game_id'],
+                        'class': row['class'],
+                        'is_selected': row['is_selected']
+                    }).eq('display_id', row['display_id']).execute()
+                
+                st.session_state.players = load_players()
+                st.success("修改已保存!")
+                st.rerun()
+            except Exception as e:
+                st.error(f"保存失败: {str(e)}")
+        
+        if st.button("重置选择状态"):
+            try:
+                supabase.table('players').update({"is_selected": False}).neq("game_id", "").execute()
+                st.session_state.players = load_players()
+                st.rerun()
+            except Exception as e:
+                st.error(f"重置失败: {str(e)}")
+    
+    with tab2:
+        st.subheader("队伍管理")
+        if not st.session_state.teams:
+            st.info("暂无队伍")
+            return
+            
+        for team in st.session_state.teams:
+            with st.expander(f"队伍{team['id']}-队长:{team['captain']}"):
+                # 获取成员信息
+                members_info = []
+                for member in team['members']:
+                    player = st.session_state.players[
+                        st.session_state.players['game_id'] == member
+                    ]
+                    members_info.append({
+                        '游戏ID': member,
+                        '游戏职业': player['class'].values[0] if not player.empty else "未知"
+                    })
+                
+                # 显示队伍信息
+                df = pd.DataFrame({
+                    '角色': ['队长'] + ['队员']*(len(team['members'])-1),
+                    '游戏ID': [m['游戏ID'] for m in members_info],
+                    '游戏职业': [m['游戏职业'] for m in members_info]
+                })
+                st.dataframe(df, hide_index=True)
+                
+                if st.button(f"解散队伍{team['id']}", key=f"disband_{team['id']}"):
+                    if delete_team_from_db(team['id'], team['members']):
+                        st.session_state.teams = load_teams()
+                        st.session_state.players = load_players()
+                        st.rerun()
+    
+    with tab3:
+        st.subheader("数据一致性维护")
+        
+        st.markdown("""
+        **功能说明**:
+        - 此功能将对比`players`表中的`is_selected`字段与`teams`表中的实际组队情况
+        - 如果发现玩家标记为已选择(`is_selected=True`)但实际不在任何队伍中，将自动修正
+        """)
+        
+        if st.button("执行数据一致性检查", help="点击检查并修复数据不一致问题"):
+            with st.spinner("正在检查数据一致性..."):
+                if check_and_fix_selection_consistency():
+                    # 刷新本地数据
+                    st.session_state.players = load_players()
+                    st.session_state.teams = load_teams()
+                    st.rerun()
+        
+        # 显示当前数据状态对比
+        st.subheader("当前数据状态")
+        
+        # 获取已选择但不在队伍中的玩家
+        selected_players = set(st.session_state.players[st.session_state.players['is_selected']]['game_id'])
+        team_players = set()
+        for team in st.session_state.teams:
+            team_players.add(team['captain'])
+            team_players.update(team['members'])
+        
+        inconsistent_players = selected_players - team_players
+        
+        if inconsistent_players:
+            st.warning(f"发现 {len(inconsistent_players)} 条不一致记录:")
+            inconsistent_df = st.session_state.players[
+                st.session_state.players['game_id'].isin(inconsistent_players)
+            ][['display_id', 'game_id', 'class']]
+            st.dataframe(inconsistent_df.rename(columns={
+                'display_id': '序号',
+                'game_id': '游戏ID',
+                'class': '职业'
+            }), hide_index=True)
+        else:
+            st.success("未发现数据不一致情况")
 
 # ========================
 # 主程序
@@ -376,6 +492,7 @@ def main():
     if not st.session_state.admin_logged_in:
         with st.sidebar:
             st.title("导航菜单")
+            st.image("https://cdn.biubiu001.com/p/ping/20250410/img/b1b152ffc1697af5cfa95e0d05b3aa26.png?x-oss-process=image/resize,w_400/format,webp/quality,Q_90", width=150, use_column_width='auto')
             page = st.radio("选择页面", ["组队系统", "查看组队列表"], index=0)
             
         if page == "组队系统":
