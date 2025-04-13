@@ -186,8 +186,8 @@ def check_admin_password():
 def create_team(team_members: List[str], captain: str) -> bool:
     """创建队伍"""
     try:
-        if len(team_members) != 6:
-            st.error("队伍需要6名成员!")
+        if len(team_members) < 3 or len(team_members) > 6:
+            st.error("队伍需要至少3名成员且最多6名成员!")
             return False
 
         # 验证所有成员存在
@@ -337,11 +337,11 @@ def main_page():
 
     # 提交按钮
     if st.button("✅ 确认组队"):
-        if len(selected) == 5:  # 必须选择5人
+        if len(selected) == 2:  # 必须选择2人
             if create_team([captain] + selected, captain):
                 st.rerun()
         else:
-            st.error("请选择5名队员!")
+            st.error("请选择至少2名队员!")
 
 
 def admin_panel():
