@@ -2,166 +2,51 @@ import streamlit as st
 import pandas as pd
 import hashlib
 import os
+import time
 import requests
 from io import BytesIO
-from typing import List, Dict
+from typing import List, Dict, Optional, Set
 from supabase import create_client, Client
 from datetime import datetime
+from functools import wraps
 
 # ========================
 # 配置部分
 # ========================
-# 必须在最前面设置页面配置
 st.set_page_config(layout="wide", page_title="游戏组队系统")
 
-# Supabase配置
-SUPABASE_URL = os.getenv('SUPABASE_URL', st.secrets["SUPABASE_URL"])
-SUPABASE_KEY = os.getenv('SUPABASE_KEY', st.secrets["SUPABASE_KEY"])
-ADMIN_PASSWORD_HASH = hashlib.sha256(st.secrets["ADMIN_PASSWORD"].encode()).hexdigest()
 
-# 腾讯文档配置
-TENCENT_DOC_URL = st.secrets.get("TENCENT_DOC_URL", "")
+# 游戏配置
+class Config:
+    SUPABASE_URL = os.getenv('SUPABASE_URL', st.secrets["SUPABASE_URL"])
+    SUPABASE_KEY = os.getenv('SUPABASE_KEY', st.secrets["SUPABASE_KEY"])
+    ADMIN_PASSWORD_HASH = hashlib.sha256(st.secrets["ADMIN_PASSWORD"].encode()).hexdigest()
+    TENCENT_DOC_URL = st.secrets.get("TENCENT_DOC_URL", "")
+    GAME_CLASSES = ['大理', '峨眉', '丐帮', '明教', '天山', '无尘', '武当', '逍遥', '星宿', '玄机', '白驼']
+
 
 # 初始化Supabase客户端
-supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
-
-# 游戏职业列表
-GAME_CLASSES = [
-    '大理', '峨眉', '丐帮', '明教', '天山',
-    '无尘', '武当', '逍遥', '星宿', '玄机'
-]
+supabase: Client = create_client(Config.SUPABASE_URL, Config.SUPABASE_KEY)
 
 
 # ========================
-# Supabase 数据操作模块 (完全保留原有代码)
+# 工具函数
 # ========================
-def load_players() -> pd.DataFrame:
-    """从Supabase加载玩家数据（按display_id排序）"""
-    try:
-        response = supabase.table('players').select("display_id, game_id, class, is_selected").order(
-            "display_id").execute()
-        players = response.data if response.data else []
-        return pd.DataFrame(players)
-    except Exception as e:
-        st.error(f"加载玩家数据失败: {str(e)}")
-        return pd.DataFrame(columns=['display_id', 'game_id', 'class', 'is_selected'])
+def handle_db_errors(func):
+    """数据库操作错误处理装饰器"""
+
+    @wraps(func)
+    def wrapper(*args, **kwargs):
+        try:
+            return func(*args, **kwargs)
+        except Exception as e:
+            st.error(f"操作失败: {str(e)}")
+            return False
+
+    return wrapper
 
 
-def load_teams() -> List[Dict]:
-    """从Supabase加载队伍数据"""
-    try:
-        response = supabase.table('teams').select("*").order("created_at", desc=True).execute()
-        return response.data if response.data else []
-    except Exception as e:
-        st.error(f"加载队伍数据失败: {str(e)}")
-        return []
-
-
-def add_player(game_id: str, game_class: str) -> bool:
-    """添加新玩家到Supabase"""
-    try:
-        response = supabase.table('players').insert({
-            "game_id": game_id,
-            "class": game_class,
-            "is_selected": False
-        }).execute()
-        return True if response.data else False
-    except Exception as e:
-        st.error(f"添加玩家失败: {str(e)}")
-        return False
-
-
-def update_player_selection_status(game_id: str, is_selected: bool) -> bool:
-    """更新玩家选择状态"""
-    try:
-        response = supabase.table('players').update({
-            "is_selected": is_selected
-        }).eq("game_id", game_id).execute()
-        return True if response.data else False
-    except Exception as e:
-        st.error(f"更新玩家状态失败: {str(e)}")
-        return False
-
-
-def create_team_in_db(captain: str, members: List[str]) -> bool:
-    """在Supabase中创建队伍"""
-    try:
-        # 获取下一个可用的队伍ID
-        max_id_response = supabase.table('teams').select("id").order("id", desc=True).limit(1).execute()
-        next_id = 1 if not max_id_response.data else max_id_response.data[0]['id'] + 1
-
-        response = supabase.table('teams').insert({
-            "id": next_id,
-            "captain": captain,
-            "members": members,
-            "created_at": datetime.now().isoformat()
-        }).execute()
-
-        if response.data:
-            # 更新所有成员的选择状态
-            for member in members:
-                update_player_selection_status(member, True)
-            return True
-        return False
-    except Exception as e:
-        st.error(f"创建队伍失败: {str(e)}")
-        return False
-
-
-def delete_team_from_db(team_id: int, members: List[str]) -> bool:
-    """从Supabase删除队伍"""
-    try:
-        # 先更新成员状态
-        for member in members:
-            update_player_selection_status(member, False)
-
-        # 删除队伍
-        response = supabase.table('teams').delete().eq("id", team_id).execute()
-        return True if response.data else False
-    except Exception as e:
-        st.error(f"解散队伍失败: {str(e)}")
-        return False
-
-
-def check_and_fix_selection_consistency() -> bool:
-    """检查并修复players和teams表之间的选择状态一致性"""
-    try:
-        # 获取所有已选择的玩家
-        selected_players_response = supabase.table('players').select("game_id").eq("is_selected", True).execute()
-        selected_players = {p['game_id'] for p in
-                            selected_players_response.data} if selected_players_response.data else set()
-
-        # 获取所有队伍中的玩家(队长和成员)
-        teams_response = supabase.table('teams').select("captain, members").execute()
-        team_players = set()
-        if teams_response.data:
-            for team in teams_response.data:
-                team_players.add(team['captain'])
-                team_players.update(team['members'])
-
-        # 找出不一致的记录
-        inconsistent_players = selected_players - team_players
-
-        # 修复不一致的记录
-        if inconsistent_players:
-            for player_id in inconsistent_players:
-                supabase.table('players').update({"is_selected": False}).eq("game_id", player_id).execute()
-
-            st.success(f"已修复 {len(inconsistent_players)} 条不一致的记录!")
-            return True
-
-        st.info("数据一致性检查完成，未发现不一致记录")
-        return True
-
-    except Exception as e:
-        st.error(f"数据一致性检查失败: {str(e)}")
-        return False
-
-
-# ========================
-# 腾讯文档功能模块 (新增部分)
-# ========================
-def convert_tencent_doc_url(doc_url):
+def convert_tencent_doc_url(doc_url: str) -> Optional[str]:
     """将腾讯文档普通链接转换为导出链接"""
     if not doc_url or "docs.qq.com" not in doc_url:
         return None
@@ -169,72 +54,174 @@ def convert_tencent_doc_url(doc_url):
     return f"https://docs.qq.com/dop-api/opendoc?id={doc_id}&outformat=1&normal=1"
 
 
-def load_activity_data():
-    """加载腾讯文档数据"""
-    if not TENCENT_DOC_URL:
-        return None
-
-    export_url = convert_tencent_doc_url(TENCENT_DOC_URL)
-    if not export_url:
-        return None
-
-    try:
-        response = requests.get(export_url, timeout=10)
-        response.raise_for_status()
-        return BytesIO(response.content)
-    except Exception as e:
-        st.error(f"获取腾讯文档失败: {str(e)}")
-        return None
+# ========================
+# 数据操作模块
+# ========================
+@handle_db_errors
+def load_players() -> pd.DataFrame:
+    """从Supabase加载玩家数据"""
+    response = supabase.table('players').select("display_id, game_id, class, is_selected").order("display_id").execute()
+    return pd.DataFrame(response.data if response.data else [])
 
 
-def show_activity_page():
-    st.title("🗡️ 四大恶人活动安排")
-
-    if not st.secrets.get("TENCENT_DOC_URL"):
-        st.warning("当前未配置活动文档，请联系管理员")
-        return
-
-    doc_url = st.secrets.TENCENT_DOC_URL
-
-    # 方法1：直接嵌入网页（需要文档开启"所有人可查看"）
-    st.markdown(f"""
-    <iframe src="{doc_url}" 
-            width="100%" 
-            height="800"
-            frameborder="0"
-            allowfullscreen>
-    </iframe>
-    """, unsafe_allow_html=True)
+@handle_db_errors
+def load_teams() -> List[Dict]:
+    """从Supabase加载队伍数据"""
+    response = supabase.table('teams').select("*").order("created_at", desc=True).execute()
+    return response.data if response.data else []
 
 
-# 在admin_panel函数中添加配置界面
-def admin_panel(tab4=None):
-    # ... [其他管理功能不变] ...
+@handle_db_errors
+def add_player(game_id: str, game_class: str) -> bool:
+    """添加新玩家"""
+    response = supabase.table('players').insert({
+        "game_id": game_id,
+        "class": game_class,
+        "is_selected": False
+    }).execute()
+    return bool(response.data)
 
-    with tab4:
-        st.subheader("四大恶人活动配置")
 
-        st.markdown("""
-        ### 配置指南
-        1. 访问[腾讯文档](https://docs.qq.com/)创建/上传文件
-        2. 点击右上角「分享」→ 设置「所有人可查看」
-        3. 复制浏览器地址栏的链接
-        """)
+@handle_db_errors
+def update_player_selection_status(game_id: str, is_selected: bool) -> bool:
+    """更新玩家选择状态"""
+    response = supabase.table('players').update({"is_selected": is_selected}).eq("game_id", game_id).execute()
+    return bool(response.data)
 
-        current_url = st.text_input(
-            "腾讯文档链接",
-            value=st.secrets.get("TENCENT_DOC_URL", ""),
-            key="tencent_doc_url"
-        )
 
-        if st.button("保存配置"):
-            # 实际部署时应保存到数据库
-            st.success("配置已更新！请重新部署应用使更改生效")
-            st.markdown(f"当前配置链接: {current_url}")
+@handle_db_errors
+def create_team_in_db(captain: str, members: List[str]) -> bool:
+    """在数据库中创建队伍"""
+    members = [m for m in members if m != captain]  # 移除队长
+
+    # 获取下一个队伍ID
+    max_id_response = supabase.table('teams').select("id").order("id", desc=True).limit(1).execute()
+    next_id = 1 if not max_id_response.data else max_id_response.data[0]['id'] + 1
+
+    response = supabase.table('teams').insert({
+        "id": next_id,
+        "captain": captain,
+        "members": members,
+        "created_at": datetime.now().isoformat()
+    }).execute()
+
+    if response.data:
+        update_player_selection_status(captain, True)
+        for member in members:
+            update_player_selection_status(member, True)
+        return True
+    return False
+
+
+@handle_db_errors
+def delete_team_from_db(team_id: int, members: List[str]) -> bool:
+    """从数据库删除队伍"""
+    for member in members:
+        update_player_selection_status(member, False)
+    response = supabase.table('teams').delete().eq("id", team_id).execute()
+    return bool(response.data)
+
+
+@handle_db_errors
+def update_team_members(team_id: int, members: List[str]) -> bool:
+    """更新队伍成员"""
+    if len(members) != len(set(members)):
+        st.error("成员列表包含重复项")
+        return False
+
+    response = supabase.table('teams').update({"members": members}).eq("id", team_id).execute()
+    return bool(response.data)
+
+
+@handle_db_errors
+def create_change_request(game_id: str, new_game_id: str, new_class: str, status: str = "pending") -> bool:
+    """创建更改请求"""
+    response = supabase.table('change_requests').insert({
+        "game_id": game_id,
+        "new_game_id": new_game_id,
+        "new_class": new_class,
+        "status": status,
+        "created_at": datetime.now().isoformat()
+    }).execute()
+    return bool(response.data)
+
+
+@handle_db_errors
+def load_change_requests(status: str = None) -> List[Dict]:
+    """加载更改请求"""
+    query = supabase.table('change_requests').select("*").order("created_at", desc=True)
+    if status:
+        query = query.eq("status", status)
+    response = query.execute()
+    return response.data if response.data else []
+
+
+@handle_db_errors
+def update_change_request(request_id: int, status: str) -> bool:
+    """更新更改请求状态"""
+    response = supabase.table('change_requests').update({"status": status}).eq("id", request_id).execute()
+    return bool(response.data)
+
+
+@handle_db_errors
+def approve_change_request(request: Dict) -> bool:
+    """批准更改请求"""
+    old_game_id = request['game_id']
+    new_game_id = request['new_game_id'] if request['new_game_id'] and request[
+        'new_game_id'] != old_game_id else old_game_id
+    new_class = request['new_class']
+
+    # 更新玩家信息
+    update_data = {}
+    if new_game_id != old_game_id:
+        update_data['game_id'] = new_game_id
+    if new_class:
+        update_data['class'] = new_class
+
+    if update_data:
+        supabase.table('players').update(update_data).eq("game_id", old_game_id).execute()
+
+    # 更新队伍数据
+    if new_game_id != old_game_id:
+        supabase.table('teams').update({"captain": new_game_id}).eq("captain", old_game_id).execute()
+
+        teams_response = supabase.table('teams').select("*").execute()
+        if teams_response.data:
+            for team in teams_response.data:
+                if old_game_id in team['members']:
+                    updated_members = [new_game_id if m == old_game_id else m for m in team['members']]
+                    update_team_members(team['id'], updated_members)
+
+    return update_change_request(request['id'], "approved")
+
+
+@handle_db_errors
+def check_and_fix_selection_consistency() -> bool:
+    """检查并修复数据一致性"""
+    selected_players = set(
+        supabase.table('players')
+        .select("game_id")
+        .eq("is_selected", True)
+        .execute()
+        .data or []
+    )
+
+    teams_data = supabase.table('teams').select("captain, members").execute().data or []
+    team_players = {team['captain'] for team in teams_data}
+    team_players.update(member for team in teams_data for member in team['members'])
+
+    inconsistent_players = selected_players - team_players
+    if not inconsistent_players:
+        st.info("数据一致性检查完成，未发现不一致记录")
+        return True
+
+    supabase.table('players').update({"is_selected": False}).in_('game_id', list(inconsistent_players)).execute()
+    st.success(f"已修复 {len(inconsistent_players)} 条不一致的记录!")
+    return True
 
 
 # ========================
-# 核心功能模块 (完全保留原有代码)
+# 页面功能模块
 # ========================
 def initialize_data():
     """初始化数据"""
@@ -244,6 +231,8 @@ def initialize_data():
         st.session_state.teams = load_teams()
     if 'admin_logged_in' not in st.session_state:
         st.session_state.admin_logged_in = False
+    if 'change_requests' not in st.session_state:
+        st.session_state.change_requests = load_change_requests()
 
 
 def check_admin_password():
@@ -252,7 +241,7 @@ def check_admin_password():
         st.header("管理员登录")
         password = st.text_input("密码:", type="password", key="admin_pwd")
         if st.button("登录"):
-            if hashlib.sha256(password.encode()).hexdigest() == ADMIN_PASSWORD_HASH:
+            if hashlib.sha256(password.encode()).hexdigest() == Config.ADMIN_PASSWORD_HASH:
                 st.session_state.admin_logged_in = True
                 st.success("登录成功!")
                 st.rerun()
@@ -263,47 +252,233 @@ def check_admin_password():
             st.rerun()
 
 
-def create_team(team_members: List[str], captain: str) -> bool:
-    """创建队伍"""
-    try:
-        if len(team_members) < 3 or len(team_members) > 6:
-            st.error("队伍需要至少3名成员且最多6名成员!")
-            return False
+def display_team_info(team: Dict, show_disband_button: bool = False) -> None:
+    """显示队伍信息"""
+    # 获取成员信息
+    members_info = []
+    for member in team['members']:
+        if member == team['captain']:
+            continue
+        player = st.session_state.players[st.session_state.players['game_id'] == member]
+        members_info.append({
+            '游戏ID': member,
+            '游戏职业': player['class'].values[0] if not player.empty else "未知"
+        })
 
-        # 验证所有成员存在
-        existing_players = set(st.session_state.players['game_id'].values)
-        for member in team_members:
-            if member not in existing_players:
-                st.error(f"玩家 {member} 不存在!")
-                return False
+    # 显示队伍信息
+    cols = st.columns([1, 3])
+    with cols[0]:
+        st.metric("队伍ID", team['id'])
+        st.metric("队长", team['captain'])
+        st.metric("当前人数", f"{len(members_info) + 1}/6")
+        if 'created_at' in team:
+            created_time = pd.to_datetime(team['created_at']).strftime('%Y-%m-%d %H:%M')
+            st.metric("创建时间", created_time)
 
-        # 检查是否已被选择
-        selected_players = {m for team in st.session_state.teams for m in team['members']}
-        if any(m in selected_players for m in team_members):
-            st.error("有成员已被其他队伍选中!")
-            return False
+    with cols[1]:
+        # 创建成员表格
+        df_data = {
+            '角色': ['队长'],
+            '游戏ID': [team['captain']],
+            '游戏职业': [
+                st.session_state.players[st.session_state.players['game_id'] == team['captain']]['class'].values[0]
+                if not st.session_state.players[st.session_state.players['game_id'] == team['captain']].empty
+                else "未知"
+            ]
+        }
 
-        # 添加到数据库
-        if create_team_in_db(captain, team_members):
-            # 更新本地状态
+        if members_info:
+            df_data['角色'].extend(['队员'] * len(members_info))
+            df_data['游戏ID'].extend([m['游戏ID'] for m in members_info])
+            df_data['游戏职业'].extend([m['游戏职业'] for m in members_info])
+
+        st.dataframe(pd.DataFrame(df_data), hide_index=True, use_container_width=True)
+
+    # 解散按钮
+    if show_disband_button and st.button(f"解散队伍{team['id']}", key=f"disband_{team['id']}"):
+        if delete_team_from_db(team['id'], [team['captain']] + team['members']):
             st.session_state.teams = load_teams()
             st.session_state.players = load_players()
-            st.success("组队成功!")
-            return True
+            st.rerun()
+
+
+def create_team(team_members: List[str], captain: str) -> bool:
+    """创建队伍"""
+    if len(team_members) < 3 or len(team_members) > 6:
+        st.error("队伍需要至少3名成员且最多6名成员!")
         return False
-    except Exception as e:
-        st.error(f"组队失败: {str(e)}")
+
+    existing_players = set(st.session_state.players['game_id'].values)
+    for member in team_members:
+        if member not in existing_players:
+            st.error(f"玩家 {member} 不存在!")
+            return False
+
+    selected_players = {m for team in st.session_state.teams for m in team['members']}
+    if any(m in selected_players for m in team_members):
+        st.error("有成员已被其他队伍选中!")
         return False
+
+    if create_team_in_db(captain, team_members):
+        st.session_state.teams = load_teams()
+        st.session_state.players = load_players()
+        st.success("组队成功!")
+        return True
+    return False
+
+
+def add_member_to_team(team_id: int, new_member: str) -> bool:
+    """添加成员到队伍"""
+    response = supabase.table('teams').select("*").eq("id", team_id).execute()
+    if not response.data:
+        st.error("找不到该队伍!")
+        return False
+
+    team = response.data[0]
+    current_members = team['members']
+
+    player_data = st.session_state.players[st.session_state.players['game_id'] == new_member]
+    if not player_data.empty and player_data['is_selected'].iloc[0]:
+        st.error("该玩家已被其他队伍选中!")
+        return False
+
+    if new_member in current_members or new_member == team['captain']:
+        st.error("该玩家已在当前队伍中!")
+        return False
+
+    if len(current_members) >= 5:
+        st.error("队伍人数已达上限!")
+        return False
+
+    updated_members = current_members + [new_member]
+    if not update_team_members(team_id, updated_members):
+        return False
+
+    update_player_selection_status(new_member, True)
+    st.session_state.players = load_players()
+    st.session_state.teams = load_teams()
+    return True
 
 
 # ========================
-# 页面模块 (修改部分)
+# 页面模块
 # ========================
+def show_activity_page():
+    """显示活动页面"""
+    st.title("🗡️ 四大恶人活动安排")
+
+    if not Config.TENCENT_DOC_URL:
+        st.warning("当前未配置活动文档，请联系管理员")
+        return
+
+    st.markdown(f"""
+    <iframe src="{Config.TENCENT_DOC_URL}" 
+            width="100%" 
+            height="800"
+            frameborder="0"
+            allowfullscreen>
+    </iframe>
+    """, unsafe_allow_html=True)
+
+
+def show_change_info_page():
+    """显示信息更改页面"""
+    st.title("✏️ 信息更改")
+    players = st.session_state.players
+
+    game_id = st.selectbox("选择您的游戏ID", options=players['game_id'].tolist(), key="change_info_game_id")
+
+    if game_id:
+        player_info = players[players['game_id'] == game_id].iloc[0]
+        st.subheader("当前信息")
+        cols = st.columns(2)
+        with cols[0]:
+            st.text_input("当前游戏ID", value=player_info['game_id'], disabled=True)
+        with cols[1]:
+            st.text_input("当前职业", value=player_info['class'], disabled=True)
+
+        st.subheader("更改信息")
+        new_game_id = st.text_input("新游戏ID (如不需更改请留空)", key="new_game_id")
+        new_class = st.selectbox(
+            "新职业 (如不需更改请选择当前职业)",
+            options=Config.GAME_CLASSES,
+            index=Config.GAME_CLASSES.index(player_info['class']) if player_info['class'] in Config.GAME_CLASSES else 0,
+            key="new_class"
+        )
+
+        if st.button("提交更改请求"):
+            if not new_game_id and new_class == player_info['class']:
+                st.warning("请至少修改一项信息")
+            else:
+                if create_change_request(
+                        game_id,
+                        new_game_id if new_game_id else game_id,
+                        new_class
+                ):
+                    st.success("更改请求已提交，请等待管理员审核！")
+                else:
+                    st.error("提交更改请求失败")
+
+
+def show_incomplete_teams():
+    """显示未满队伍"""
+    st.title("🟡 未满的队伍")
+
+    if not st.session_state.teams:
+        st.info("暂无组队记录")
+        return
+
+    available_players = set(st.session_state.players[~st.session_state.players['is_selected']]['game_id'])
+    incomplete_teams = [team for team in st.session_state.teams if (1 + len(team['members'])) < 6]
+
+    if not incomplete_teams:
+        st.success("🎉 所有队伍都已满员!")
+        return
+
+    st.subheader(f"当前共有 {len(incomplete_teams)} 支队伍未满6人")
+
+    for team in incomplete_teams:
+        member_count = 1 + len(team['members'])
+        with st.expander(f"队伍 {team['id']} - 队长: {team['captain']} ({member_count}/6)", expanded=True):
+            display_team_info(team)
+
+            if available_players:
+                st.subheader("添加新成员")
+                new_member = st.selectbox(
+                    "选择要添加的成员",
+                    options=list(available_players),
+                    key=f"add_member_{team['id']}"
+                )
+
+                if st.button(f"添加到队伍 {team['id']}", key=f"add_btn_{team['id']}"):
+                    with st.spinner("添加中，请稍候..."):
+                        if add_member_to_team(team['id'], new_member):
+                            st.success(f"✅ 已成功将 {new_member} 添加到队伍 {team['id']}!")
+                            time.sleep(1.5)
+                            st.rerun()
+            else:
+                st.warning("没有可用的玩家可以添加")
+
+
+def show_team_list():
+    """显示队伍列表"""
+    st.title("🏆 组队列表")
+
+    if not st.session_state.teams:
+        st.info("暂无组队记录")
+        return
+
+    st.subheader(f"当前共有 {len(st.session_state.teams)} 支队伍")
+
+    for team in st.session_state.teams:
+        with st.expander(f"队伍 {team['id']} - 队长: {team['captain']}", expanded=True):
+            display_team_info(team)
+
+
 def main_page():
-    """主界面"""
+    """主页面"""
     st.title("🎮 游戏组队系统")
 
-    # 玩家列表
     st.header("👥 玩家名单")
     st.dataframe(
         st.session_state.players.rename(columns={
@@ -321,138 +496,64 @@ def main_page():
         height=400
     )
 
-    # 组队表单
     st.header("🛠️ 创建队伍")
-
-    # 队长选择
     available_captains = st.session_state.players[~st.session_state.players['is_selected']]['game_id']
     if len(available_captains) == 0:
         st.warning("没有可选的队长，所有玩家已被组队")
         return
 
-    captain = st.selectbox(
-        "选择队长:",
-        options=available_captains,
-        key='captain'
-    )
+    captain = st.selectbox("选择队长:", options=available_captains, key='captain')
 
-    # 队员选择
     available = st.session_state.players[
         (~st.session_state.players['is_selected']) &
         (st.session_state.players['game_id'] != captain)
         ]['game_id']
     selected = st.multiselect("选择队员 (2-5人):", options=available, key='members')
 
-    # 显示队伍预览
     if captain and selected:
         st.subheader("队伍预览")
         try:
             team_members = [captain] + selected
             roles = ['队长'] + ['队员'] * len(selected)
-
-            # 获取职业信息
             classes = []
             for member in team_members:
-                player_data = st.session_state.players[
-                    st.session_state.players['game_id'] == member
-                    ]
-                classes.append(
-                    player_data['class'].values[0]
-                    if not player_data.empty
-                    else '未知职业'
-                )
+                player_data = st.session_state.players[st.session_state.players['game_id'] == member]
+                classes.append(player_data['class'].values[0] if not player_data.empty else '未知职业')
 
-            team_df = pd.DataFrame({
+            st.dataframe(pd.DataFrame({
                 '角色': roles,
                 '游戏ID': team_members,
                 '游戏职业': classes
-            })
-            st.dataframe(team_df, hide_index=True)
-
+            }), hide_index=True)
         except Exception as e:
             st.error(f"创建预览失败: {str(e)}")
 
-    # 提交按钮
     if st.button("✅ 确认组队"):
-        if 2 <= len(selected) <= 5:  # 3-6人队伍 (队长+2-5队员)
+        if 2 <= len(selected) <= 5:
             if create_team([captain] + selected, captain):
                 st.rerun()
         else:
             st.error("请选择2到5名队员!")
 
 
-def show_team_list():
-    """显示组队列表页面"""
-    st.title("🏆 组队列表")
-
-    if not st.session_state.teams:
-        st.info("暂无组队记录")
-        return
-
-    # 显示队伍统计信息
-    st.subheader(f"当前共有 {len(st.session_state.teams)} 支队伍")
-
-    for team in st.session_state.teams:
-        with st.expander(f"队伍 {team['id']} - 队长: {team['captain']}", expanded=True):
-            # 获取队伍成员详细信息
-            members_info = []
-            for member in team['members']:
-                player = st.session_state.players[
-                    st.session_state.players['game_id'] == member
-                    ]
-                members_info.append({
-                    '游戏ID': member,
-                    '游戏职业': player['class'].values[0] if not player.empty else "未知"
-                })
-
-            # 显示队伍信息
-            cols = st.columns([1, 3])
-            with cols[0]:
-                st.metric("队伍ID", team['id'])
-                st.metric("队长", team['captain'])
-                if 'created_at' in team:
-                    created_time = pd.to_datetime(team['created_at']).strftime('%Y-%m-%d %H:%M')
-                    st.metric("创建时间", created_time)
-
-            with cols[1]:
-                # 显示成员表格
-                df = pd.DataFrame({
-                    '角色': ['队长'] + ['队员'] * (len(team['members'])),
-                    '游戏ID': [team['captain']] + [m['游戏ID'] for m in members_info],
-                    '游戏职业': [
-                                    st.session_state.players[st.session_state.players['game_id'] == team['captain']][
-                                        'class'].values[0]
-                                    if not st.session_state.players[
-                                        st.session_state.players['game_id'] == team['captain']].empty
-                                    else "未知"
-                                ] + [m['游戏职业'] for m in members_info]
-                })
-                st.dataframe(df, hide_index=True, use_container_width=True)
-
-
 def admin_panel():
-    """管理员界面"""
+    """管理员面板"""
     st.header("📊 管理员后台")
-
-    tab1, tab2, tab3, tab4 = st.tabs(["玩家管理", "队伍管理", "数据维护", "活动配置"])
+    tab1, tab2, tab3, tab4, tab5 = st.tabs(["玩家管理", "队伍管理", "数据维护", "活动配置", "更改审批"])
 
     with tab1:
         st.subheader("玩家名单管理")
-
-        # 添加新玩家
         with st.expander("添加玩家", expanded=True):
             cols = st.columns(2)
             with cols[0]:
                 new_id = st.text_input("游戏ID", key="new_id")
             with cols[1]:
-                new_class = st.selectbox("职业", GAME_CLASSES, key="new_class")
-            if st.button("添加"):
-                if new_id:
-                    if add_player(new_id, new_class):
-                        st.session_state.players = load_players()
-                        st.rerun()
+                new_class = st.selectbox("职业", Config.GAME_CLASSES, key="new_class")
+            if st.button("添加") and new_id:
+                if add_player(new_id, new_class):
+                    st.session_state.players = load_players()
+                    st.rerun()
 
-        # 玩家列表编辑
         st.subheader("当前玩家")
         edited_df = st.data_editor(
             st.session_state.players.rename(columns={
@@ -466,22 +567,19 @@ def admin_panel():
             column_config={
                 "序号": st.column_config.NumberColumn(width="small", disabled=True),
                 "游戏ID": st.column_config.TextColumn(width="medium"),
-                "游戏职业": st.column_config.SelectboxColumn(options=GAME_CLASSES),
+                "游戏职业": st.column_config.SelectboxColumn(options=Config.GAME_CLASSES),
                 "已选择": st.column_config.CheckboxColumn(disabled=True)
             },
             hide_index=True
         )
 
         if st.button("保存修改"):
-            # 重命名回原始列名
             updated_players = edited_df.rename(columns={
                 '序号': 'display_id',
                 '游戏ID': 'game_id',
                 '游戏职业': 'class',
                 '已选择': 'is_selected'
             })
-
-            # 更新数据库
             try:
                 for _, row in updated_players.iterrows():
                     supabase.table('players').update({
@@ -489,7 +587,6 @@ def admin_panel():
                         'class': row['class'],
                         'is_selected': row['is_selected']
                     }).eq('display_id', row['display_id']).execute()
-
                 st.session_state.players = load_players()
                 st.success("修改已保存!")
                 st.rerun()
@@ -509,61 +606,26 @@ def admin_panel():
         if not st.session_state.teams:
             st.info("暂无队伍")
             return
-
         for team in st.session_state.teams:
             with st.expander(f"队伍{team['id']}-队长:{team['captain']}"):
-                # 获取成员信息
-                members_info = []
-                for member in team['members']:
-                    player = st.session_state.players[
-                        st.session_state.players['game_id'] == member
-                        ]
-                    members_info.append({
-                        '游戏ID': member,
-                        '游戏职业': player['class'].values[0] if not player.empty else "未知"
-                    })
-
-                # 显示队伍信息
-                df = pd.DataFrame({
-                    '角色': ['队长'] + ['队员'] * (len(team['members'])),
-                    '游戏ID': [team['captain']] + [m['游戏ID'] for m in members_info],
-                    '游戏职业': [
-                                    st.session_state.players[st.session_state.players['game_id'] == team['captain']][
-                                        'class'].values[0]
-                                    if not st.session_state.players[
-                                        st.session_state.players['game_id'] == team['captain']].empty
-                                    else "未知"
-                                ] + [m['游戏职业'] for m in members_info]
-                })
-                st.dataframe(df, hide_index=True)
-
-                if st.button(f"解散队伍{team['id']}", key=f"disband_{team['id']}"):
-                    if delete_team_from_db(team['id'], team['members']):
-                        st.session_state.teams = load_teams()
-                        st.session_state.players = load_players()
-                        st.rerun()
+                display_team_info(team, show_disband_button=True)
 
     with tab3:
         st.subheader("数据一致性维护")
-
         st.markdown("""
         **功能说明**:
         - 此功能将对比`players`表中的`is_selected`字段与`teams`表中的实际组队情况
         - 如果发现玩家标记为已选择(`is_selected=True`)但实际不在任何队伍中，将自动修正
         """)
 
-        if st.button("执行数据一致性检查", help="点击检查并修复数据不一致问题"):
+        if st.button("执行数据一致性检查"):
             with st.spinner("正在检查数据一致性..."):
                 if check_and_fix_selection_consistency():
-                    # 刷新本地数据
                     st.session_state.players = load_players()
                     st.session_state.teams = load_teams()
                     st.rerun()
 
-        # 显示当前数据状态对比
         st.subheader("当前数据状态")
-
-        # 获取已选择但不在队伍中的玩家
         selected_players = set(st.session_state.players[st.session_state.players['is_selected']]['game_id'])
         team_players = set()
         for team in st.session_state.teams:
@@ -571,13 +633,11 @@ def admin_panel():
             team_players.update(team['members'])
 
         inconsistent_players = selected_players - team_players
-
         if inconsistent_players:
             st.warning(f"发现 {len(inconsistent_players)} 条不一致记录:")
-            inconsistent_df = st.session_state.players[
+            st.dataframe(st.session_state.players[
                 st.session_state.players['game_id'].isin(inconsistent_players)
-            ][['display_id', 'game_id', 'class']]
-            st.dataframe(inconsistent_df.rename(columns={
+            ][['display_id', 'game_id', 'class']].rename(columns={
                 'display_id': '序号',
                 'game_id': '游戏ID',
                 'class': '职业'
@@ -587,41 +647,86 @@ def admin_panel():
 
     with tab4:
         st.subheader("四大恶人活动配置")
-
-        st.markdown("""
-        ### 腾讯文档使用说明
-        1. 访问[腾讯文档官网](https://docs.qq.com/)
-        2. 上传或创建Excel文件
-        3. 点击右上角「分享」→ 设置为「所有人可查看」
-        4. 将分享链接粘贴到下方：
-        """)
-
-        # 显示当前配置
         st.markdown(f"""
         **当前配置的文档链接**:
         ```
-        {TENCENT_DOC_URL or "未配置"}
+        {Config.TENCENT_DOC_URL or "未配置"}
         ```
         """)
-
-        if TENCENT_DOC_URL:
+        if Config.TENCENT_DOC_URL:
             st.success("✅ 有效配置")
-            st.markdown(f"[点击测试打开文档]({TENCENT_DOC_URL})")
+            st.markdown(f"[点击测试打开文档]({Config.TENCENT_DOC_URL})")
         else:
             st.warning("⚠️ 未配置文档链接")
+
+    with tab5:
+        st.subheader("待审批的更改请求")
+        pending_requests = load_change_requests("pending")
+        if not pending_requests:
+            st.info("没有待审批的更改请求")
+        else:
+            for request in pending_requests:
+                with st.container():
+                    st.markdown(f"### 请求ID: {request['id']} - 玩家: {request['game_id']}")
+                    col1, col2 = st.columns(2)
+                    with col1:
+                        st.markdown("**当前信息**")
+                        st.write(f"游戏ID: `{request['game_id']}`")
+                        player_data = st.session_state.players[
+                            st.session_state.players['game_id'] == request['game_id']]
+                        current_class = player_data['class'].values[0] if not player_data.empty else "未知"
+                        st.write(f"职业: `{current_class}`")
+                        st.markdown("**提交时间**")
+                        st.write(pd.to_datetime(request['created_at']).strftime('%Y-%m-%d %H:%M:%S'))
+                    with col2:
+                        st.markdown("**请求更改**")
+                        changes = []
+                        if request['new_game_id'] and request['new_game_id'] != request['game_id']:
+                            changes.append(f"游戏ID: `{request['game_id']}` → `{request['new_game_id']}`")
+                        if request['new_class'] and request['new_class'] != current_class:
+                            changes.append(f"职业: `{current_class}` → `{request['new_class']}`")
+                        if changes:
+                            for change in changes:
+                                st.write(change)
+                        else:
+                            st.warning("没有有效的更改内容")
+                    st.markdown("---")
+                    action_col1, action_col2, _ = st.columns([1, 1, 2])
+                    with action_col1:
+                        if st.button(f"✅ 批准", key=f"approve_{request['id']}"):
+                            with st.spinner("处理中..."):
+                                if approve_change_request(request):
+                                    st.success("已批准更改请求")
+                                    st.session_state.players = load_players()
+                                    st.session_state.teams = load_teams()
+                                    st.session_state.change_requests = load_change_requests()
+                                    time.sleep(1)
+                                    st.rerun()
+                                else:
+                                    st.error("批准失败")
+                    with action_col2:
+                        if st.button(f"❌ 拒绝", key=f"reject_{request['id']}"):
+                            with st.spinner("处理中..."):
+                                if update_change_request(request['id'], "rejected"):
+                                    st.success("已拒绝更改请求")
+                                    st.session_state.change_requests = load_change_requests()
+                                    time.sleep(1)
+                                    st.rerun()
+                                else:
+                                    st.error("拒绝失败")
+                    st.markdown("---")
+                    if st.checkbox(f"显示原始请求数据 [ID: {request['id']}]", key=f"raw_{request['id']}"):
+                        st.json(request)
+                    st.markdown("---")
 
 
 # ========================
 # 主程序
 # ========================
 def main():
-    # 初始化数据
     initialize_data()
-
-    # 检查管理员登录状态
     check_admin_password()
 
-    # 左侧导航栏
     if not st.session_state.admin_logged_in:
         with st.sidebar:
             st.title("导航菜单")
@@ -630,7 +735,7 @@ def main():
                 width=150, use_container_width=True)
             page = st.radio(
                 "选择页面",
-                ["组队系统", "查看组队列表", "四大恶人活动"],
+                ["组队系统", "查看组队列表", "未满的队伍", "信息更改", "四大恶人活动"],
                 index=0
             )
 
@@ -638,10 +743,13 @@ def main():
             main_page()
         elif page == "查看组队列表":
             show_team_list()
+        elif page == "未满的队伍":
+            show_incomplete_teams()
+        elif page == "信息更改":
+            show_change_info_page()
         elif page == "四大恶人活动":
             show_activity_page()
     else:
-        # 管理员直接进入后台
         admin_panel()
 
 
