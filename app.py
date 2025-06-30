@@ -197,27 +197,75 @@ def approve_change_request(request: Dict) -> bool:
 
 @handle_db_errors
 def check_and_fix_selection_consistency() -> bool:
-    """检查并修复数据一致性"""
-    selected_players = set(
-        supabase.table('players')
-        .select("game_id")
-        .eq("is_selected", True)
-        .execute()
-        .data or []
-    )
+    """
+    全面检查并修复players表的is_selected字段与teams表实际组队情况的一致性
+    修复两种不一致情况:
+    1. is_selected=True但不在任何队伍中的玩家 → 设为False
+    2. 在队伍中但is_selected=False的玩家 → 设为True
+    """
+    try:
+        # 获取所有玩家选择状态
+        players_response = supabase.table('players').select("game_id, is_selected").execute()
+        all_players = {p['game_id']: p['is_selected'] for p in players_response.data} if players_response.data else {}
 
-    teams_data = supabase.table('teams').select("captain, members").execute().data or []
-    team_players = {team['captain'] for team in teams_data}
-    team_players.update(member for team in teams_data for member in team['members'])
+        # 获取所有队伍中的玩家(队长和成员)
+        teams_response = supabase.table('teams').select("captain, members").execute()
+        team_players = set()
 
-    inconsistent_players = selected_players - team_players
-    if not inconsistent_players:
-        st.info("数据一致性检查完成，未发现不一致记录")
-        return True
+        if teams_response.data:
+            for team in teams_response.data:
+                # 处理队长
+                captain = str(team['captain']) if not isinstance(team['captain'], str) else team['captain']
+                team_players.add(captain)
 
-    supabase.table('players').update({"is_selected": False}).in_('game_id', list(inconsistent_players)).execute()
-    st.success(f"已修复 {len(inconsistent_players)} 条不一致的记录!")
-    return True
+                # 处理队员
+                if isinstance(team['members'], list):
+                    for member in team['members']:
+                        member_str = str(member) if not isinstance(member, str) else member
+                        team_players.add(member_str)
+
+        # 找出两种不一致情况
+        false_positives = set()  # 被标记为已选择但不在队伍中的玩家
+        false_negatives = set()  # 在队伍中但未被标记为已选择的玩家
+
+        for game_id, is_selected in all_players.items():
+            if is_selected and game_id not in team_players:
+                false_positives.add(game_id)
+            elif not is_selected and game_id in team_players:
+                false_negatives.add(game_id)
+
+        # 执行修复
+        update_count = 0
+
+        # 修复false_positives (设为False)
+        if false_positives:
+            update_response = supabase.table('players').update({"is_selected": False}).in_('game_id', list(
+                false_positives)).execute()
+            if update_response.data:
+                update_count += len(false_positives)
+
+        # 修复false_negatives (设为True)
+        if false_negatives:
+            update_response = supabase.table('players').update({"is_selected": True}).in_('game_id', list(
+                false_negatives)).execute()
+            if update_response.data:
+                update_count += len(false_negatives)
+
+        # 显示结果
+        if false_positives or false_negatives:
+            st.success(f"数据一致性检查完成，已修复 {update_count} 条不一致记录!")
+            st.json({
+                "错误标记为已选择的玩家(已修正)": list(false_positives),
+                "未标记但实际在队伍中的玩家(已修正)": list(false_negatives)
+            })
+            return True
+        else:
+            st.info("数据一致性检查完成，未发现不一致记录")
+            return True
+
+    except Exception as e:
+        st.error(f"数据一致性检查失败: {str(e)}")
+        return False
 
 
 # ========================
