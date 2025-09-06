@@ -26,7 +26,7 @@ class Config:
     SUPABASE_KEY = os.getenv('SUPABASE_KEY', st.secrets["SUPABASE_KEY"])
     ADMIN_PASSWORD_HASH = hashlib.sha256(st.secrets["ADMIN_PASSWORD"].encode()).hexdigest()
     TENCENT_DOC_URL = st.secrets.get("TENCENT_DOC_URL", "")
-    GAME_CLASSES = ['大理', '峨眉', '丐帮', '明教', '天山', '无尘', '武当', '逍遥', '星宿', '玄机', '白驼']
+    GAME_CLASSES = ['大理', '峨眉', '丐帮', '明教', '天山', '无尘', '武当', '逍遥', '星宿', '玄机', '白驼山']
     MAX_TEAM_SIZE = 6
     MIN_TEAM_SIZE = 2
 
@@ -1306,4 +1306,5 @@ def main():
 
 
 if __name__ == "__main__":
+
     main()
